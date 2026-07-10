@@ -16,6 +16,7 @@ agent-sessions \- list and filter Claude Code and Codex CLI session transcripts
 [\fB\-f\fR \fIFORMAT\fR]
 [\fB\-l\fR]
 [\fB\-\-no\-header\fR]
+[\fB\-\-flat\fR]
 [\fB\-\-claude\-dir\fR \fIDIR\fR]
 [\fB\-\-codex\-dir\fR \fIDIR\fR]
 .br
@@ -40,6 +41,21 @@ exactly what is read and how it can break if either tool changes its
 on-disk layout. See
 .B CAVEATS
 before relying on this in a script.
+.PP
+A coordinator session that spawns subagents produces one row per
+subagent with the same relationship, apart from id, in both tools'
+storage. In table format these are nested under their coordinator
+(indented, prefixed with a tree branch) instead of listed as flat,
+easily-confused rows; a subagent is identified by its
+.B role
+(agent type/nickname or task description) rather than a name, since
+subagents are never independently renamed. Use
+.B \-\-flat
+to disable nesting; \fBjson\fR/\fBjsonl\fR output is always flat and
+carries \fBparent_id\fR/\fBrole\fR so a consumer can reconstruct the
+tree itself. See
+.B SUBAGENTS
+below.
 .PP
 Output defaults to a human-readable table restricted to sessions whose
 working directory falls under
@@ -75,8 +91,8 @@ Skip sessions that were never given a human name (via \fB/rename\fR in
 Claude Code, or the equivalent thread-rename action in Codex CLI).
 .TP
 \fB\-q\fR, \fB\-\-query\fR \fITEXT\fR
-Case-insensitive substring match against the session name. Sessions
-without a name never match.
+Case-insensitive substring match against the session name, or (since
+subagents have no name of their own) a subagent's role.
 .TP
 \fB\-\-since\fR \fIDATETIME\fR, \fB\-\-until\fR \fIDATETIME\fR
 Only include sessions last updated at/after, or at/before,
@@ -107,6 +123,12 @@ transcript path as extra columns.
 .TP
 \fB\-\-no\-header\fR
 In table format, omit the header row.
+.TP
+\fB\-\-flat\fR
+In table format, list every session as its own row instead of nesting
+subagents under their coordinator. Has no effect on \fBjson\fR/\fBjsonl\fR,
+which are always flat. See
+.BR SUBAGENTS .
 .TP
 \fB\-\-claude\-dir\fR \fIDIR\fR
 Claude Code config directory to scan. Default: \fB$CLAUDE_CONFIG_DIR\fR
@@ -170,6 +192,42 @@ references the original thread. The first line is a
 Append-only log of Codex thread rename events (\fBid\fR,
 \fBthread_name\fR, \fBupdated_at\fR); the entry with the latest
 \fBupdated_at\fR per id wins.
+.TP
+.I $CLAUDE_CONFIG_DIR/projects/*/<coordinator-id>/subagents/agent\-*.jsonl
+One file per Claude Code subagent, alongside a companion
+\fBagent\-*.meta.json\fR carrying \fBagentType\fR and \fBdescription\fR,
+used to build the subagent's \fBrole\fR.
+.SH SUBAGENTS
+A session that spawns subagents (Claude Code's Agent tool; Codex CLI's
+equivalent) links each child back to its coordinator, but the two
+tools record that link completely differently:
+.PP
+Claude Code writes each subagent to its own file under
+\fI<coordinator-id>/subagents/\fR in the same project directory as the
+coordinator (see \fBFILES\fR) -- the coordinator id is the directory
+name itself. The subagent's role comes from its \fB.meta.json\fR
+sidecar: \fB"<agentType>: <description>"\fR, or whichever of the two is
+present.
+.PP
+Codex CLI writes each subagent to an ordinary-looking rollout file
+whose first record has \fBpayload.thread_source == "subagent"\fR and
+\fBpayload.parent_thread_id\fR pointing at the coordinator (sometimes
+nested instead under \fBpayload.source.subagent.thread_spawn\fR --
+both shapes have been observed). The role comes from
+\fBagent_role\fR/\fBagent_nickname\fR: \fB"<role>:<nickname>"\fR, or
+whichever of the two is present.
+.PP
+\fBthread_source == "subagent"\fR is what distinguishes an actual
+subagent spawn from a plain resume of the same thread (a resume also
+carries \fBparent_thread_id\fR, pointing at itself across restarts, but
+its \fBthread_source\fR is \fB"user"\fR) -- only a genuine subagent spawn
+is treated as a child for nesting purposes; a resume keeps showing the
+thread's own name instead, as before.
+.PP
+A subagent whose coordinator was excluded by a filter (\fB\-\-since\fR,
+\fB\-\-named\-only\fR, a \fB\-\-workspace\-root\fR mismatch, ...) still
+appears, just as a standalone top-level row instead of a nested one --
+it is never dropped because its parent didn't survive a filter.
 .SH EXAMPLES
 List sessions under the default workspace root, most recently updated
 first:
@@ -210,6 +268,14 @@ Sessions started on or after July 1st, oldest first:
 .RS
 .EX
 agent\-sessions \-\-since 2026\-07\-01 \-\-sort started \-\-reverse
+.EE
+.RE
+.PP
+Every Codex row on its own line, subagents included, no nesting:
+.PP
+.RS
+.EX
+agent\-sessions \-\-flat \-p codex
 .EE
 .RE
 .SH CAVEATS

@@ -8,7 +8,7 @@ import pytest
 
 from agent_sessions.cli import main
 
-from .helpers import make_claude_session, make_codex_session
+from .helpers import make_claude_session, make_claude_subagent, make_codex_session
 
 
 @pytest.fixture
@@ -271,3 +271,69 @@ def test_claude_dir_and_codex_dir_flags_override_env(tmp_path, monkeypatch):
     )
     assert code == 0
     assert len(rows) == 1
+
+
+def test_subagent_nests_under_coordinator_in_default_table(stores, capsys):
+    claude_dir, codex_dir = stores
+    coordinator_id = "11111111-1111-1111-1111-111111111111"
+    make_claude_session(
+        claude_dir, "/home/ubuntu/work/a", coordinator_id, renamed_to="sdk_112"
+    )
+    make_claude_subagent(
+        claude_dir, "/home/ubuntu/work/a", coordinator_id, "abc123",
+        agent_type="explorer", description="look at the sampler",
+    )
+    code = main(["--workspace-root", "/home/ubuntu/work"])
+    assert code == 0
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert any("sdk_112" in line and "└─" not in line for line in lines)
+    assert any("└─ explorer: look at the sampler" in line for line in lines)
+
+
+def test_flat_flag_lists_subagent_as_its_own_row(stores, capsys):
+    claude_dir, codex_dir = stores
+    coordinator_id = "11111111-1111-1111-1111-111111111111"
+    make_claude_session(
+        claude_dir, "/home/ubuntu/work/a", coordinator_id, renamed_to="sdk_112"
+    )
+    make_claude_subagent(
+        claude_dir, "/home/ubuntu/work/a", coordinator_id, "abc123",
+        agent_type="explorer", description="look at the sampler",
+    )
+    code = main(["--workspace-root", "/home/ubuntu/work", "--flat"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "└─" not in out
+    assert "explorer: look at the sampler" in out
+
+
+def test_query_matches_subagent_role(stores):
+    claude_dir, codex_dir = stores
+    coordinator_id = "11111111-1111-1111-1111-111111111111"
+    make_claude_session(claude_dir, "/home/ubuntu/work/a", coordinator_id)
+    make_claude_subagent(
+        claude_dir, "/home/ubuntu/work/a", coordinator_id, "abc123",
+        agent_type="explorer", description="look at the sampler code",
+    )
+    code, rows = _run_jsonl(["--workspace-root", "/home/ubuntu/work", "-q", "sampler"])
+    assert code == 0
+    assert len(rows) == 1
+    assert rows[0]["role"] == "explorer: look at the sampler code"
+
+
+def test_subagent_with_filtered_out_coordinator_renders_standalone(stores, capsys):
+    claude_dir, codex_dir = stores
+    coordinator_id = "11111111-1111-1111-1111-111111111111"
+    # Coordinator never renamed, so --named-only drops it -- the subagent
+    # (which is never independently named either) must still show up
+    # rather than silently vanishing because its parent got filtered.
+    make_claude_session(claude_dir, "/home/ubuntu/work/a", coordinator_id)
+    make_claude_subagent(
+        claude_dir, "/home/ubuntu/work/a", coordinator_id, "abc123",
+        agent_type="explorer", description="look at the sampler",
+    )
+    code, rows = _run_jsonl(["--workspace-root", "/home/ubuntu/work", "-q", "sampler"])
+    assert code == 0
+    assert len(rows) == 1
+    assert rows[0]["parent_id"] == coordinator_id

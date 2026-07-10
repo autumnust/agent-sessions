@@ -66,6 +66,9 @@ def make_codex_session(
     session_id_field: Optional[str] = None,
     parent_thread_id: Optional[str] = None,
     rollout_id: Optional[str] = None,
+    thread_source: Optional[str] = None,
+    agent_role: Optional[str] = None,
+    agent_nickname: Optional[str] = None,
 ) -> Path:
     """Write a minimal but representative Codex CLI rollout file."""
     file_id = rollout_id or session_id
@@ -77,6 +80,12 @@ def make_codex_session(
         payload["session_id"] = session_id_field
     if parent_thread_id:
         payload["parent_thread_id"] = parent_thread_id
+    if thread_source:
+        payload["thread_source"] = thread_source
+    if agent_role:
+        payload["agent_role"] = agent_role
+    if agent_nickname:
+        payload["agent_nickname"] = agent_nickname
     records = [
         {"timestamp": timestamp, "type": "session_meta", "payload": payload},
         {
@@ -87,6 +96,39 @@ def make_codex_session(
     ]
     write_jsonl(path, records)
     return path
+
+
+def make_claude_subagent(
+    claude_dir: Path,
+    cwd: str,
+    coordinator_id: str,
+    agent_hash: str,
+    *,
+    agent_type: Optional[str] = "general-purpose",
+    description: Optional[str] = "Investigate the sampler",
+    timestamp: str = "2026-07-01T10:05:00.000Z",
+) -> Path:
+    """Write a minimal Claude Code subagent transcript + its .meta.json sidecar."""
+    project_dir = claude_project_dir(claude_dir, cwd)
+    subagents_dir = project_dir / coordinator_id / "subagents"
+    agent_id = f"agent-{agent_hash}"
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "go"},
+            "cwd": cwd,
+            "timestamp": timestamp,
+            "agentId": agent_hash,
+        },
+    ]
+    write_jsonl(subagents_dir / f"{agent_id}.jsonl", records)
+    meta = {}
+    if agent_type:
+        meta["agentType"] = agent_type
+    if description:
+        meta["description"] = description
+    (subagents_dir / f"{agent_id}.meta.json").write_text(json.dumps(meta))
+    return subagents_dir / f"{agent_id}.jsonl"
 
 
 def write_codex_index(codex_dir: Path, entries: Iterable[Tuple[str, str, str]]) -> Path:

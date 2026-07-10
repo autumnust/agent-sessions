@@ -27,13 +27,16 @@ examples:
         Only show sessions you bothered to name.
 
   agent-sessions -p codex -q sampler
-        Codex sessions whose name contains "sampler".
+        Codex sessions or subagents whose name/role mentions "sampler".
 
   agent-sessions --all-workspaces --format jsonl | jq -r '.name'
         Every session on the machine, names only -- for scripts or agents.
 
   agent-sessions --since 2026-07-01 --sort started --reverse
         Sessions started on/after 2026-07-01, oldest first.
+
+  agent-sessions --flat -p codex
+        Every Codex row on its own line, subagents included, no nesting.
 
 See agent-sessions(1) for the full manual (man ./man/agent-sessions.1
 works directly from a checkout without installing it).
@@ -92,7 +95,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-q", "--query", metavar="TEXT",
-        help="case-insensitive substring match against the session name",
+        help=(
+            "case-insensitive substring match against the session name, "
+            "or a subagent's role"
+        ),
     )
     parser.add_argument(
         "--since", metavar="DATETIME",
@@ -133,6 +139,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="table format: omit the header row",
     )
     parser.add_argument(
+        "--flat", action="store_true",
+        help=(
+            "table format: list every session as its own row instead of "
+            "nesting subagents under their coordinator"
+        ),
+    )
+    parser.add_argument(
         "--claude-dir", metavar="DIR", default=None,
         help="Claude Code config directory (default: $CLAUDE_CONFIG_DIR or ~/.claude)",
     )
@@ -164,6 +177,16 @@ def _matches_workspace(cwd: Optional[str], roots: Sequence[str]) -> bool:
         if normalized == root_norm or normalized.startswith(root_norm + os.sep):
             return True
     return False
+
+
+def _matches_query(session: Session, needle: str) -> bool:
+    # Subagents are never independently named (see models.Session), so a
+    # name-only query would never find one; match its role too (agent
+    # type/nickname or task description) so e.g. `-q sampler` can surface
+    # a subagent that investigated the sampler even if its coordinator's
+    # name doesn't mention it.
+    haystack = " ".join(field for field in (session.name, session.role) if field)
+    return needle in haystack.lower()
 
 
 def _sort_key(session: Session, key: str):
@@ -206,7 +229,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sessions = [s for s in sessions if s.name]
     if args.query:
         needle = args.query.lower()
-        sessions = [s for s in sessions if s.name and needle in s.name.lower()]
+        sessions = [s for s in sessions if _matches_query(s, needle)]
     if since is not None:
         sessions = [s for s in sessions if s.updated_at >= since]
     if until is not None:
@@ -219,7 +242,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.limit is not None:
         sessions = sessions[: args.limit]
 
-    output = render(sessions, args.format, long=args.long, header=not args.no_header)
+    output = render(
+        sessions, args.format, long=args.long, header=not args.no_header, tree=not args.flat
+    )
     if output:
         print(output)
     return 0

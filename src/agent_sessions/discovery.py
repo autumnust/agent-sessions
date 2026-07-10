@@ -4,11 +4,18 @@ Neither tool exposes a public API or subcommand for listing sessions, so
 this module reads their transcript files directly:
 
   Claude Code: ``$CLAUDE_CONFIG_DIR/projects/<escaped-cwd>/<session-id>.jsonl``
-      One file per session; it grows in place across resumes. Some lines
-      carry a ``cwd`` and ``timestamp`` field directly. A ``/rename`` in
-      the session shows up as a line containing the literal text
-      ``Session renamed to: <name></local-command-stdout>``; the file is
-      scanned for the last occurrence, so the most recent rename wins.
+      One file per top-level session; it grows in place across resumes.
+      Some lines carry a ``cwd`` and ``timestamp`` field directly. A
+      ``/rename`` in the session shows up as a
+      ``{"type": "system", "subtype": "local_command", "content":
+      "<local-command-stdout>Session renamed to: <name>..."}`` record; the
+      file is scanned for the last one, so the most recent rename wins.
+
+      A coordinator session that spawns subagents (the Agent tool) writes
+      each one to its own file at
+      ``<same project dir>/<coordinator-session-id>/subagents/agent-<hash>.jsonl``,
+      with a companion ``agent-<hash>.meta.json`` carrying ``agentType``
+      and ``description``. Subagents are never independently renamed.
 
   Codex CLI: ``$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<id>.jsonl``
       One file per session *or per resume* -- resuming a session can
@@ -19,6 +26,14 @@ this module reads their transcript files directly:
       append-only ``id`` -> ``thread_name`` history in
       ``$CODEX_HOME/session_index.jsonl``; the entry with the latest
       ``updated_at`` per id wins.
+
+      A coordinator spawning a subagent also produces a new rollout file
+      referencing the parent via ``parent_thread_id``, distinguished from
+      a plain resume by ``thread_source == "subagent"`` (a resume's is
+      ``"user"``). Only that case is treated as a fold-worthy subagent: a
+      resume legitimately continues the same named thread and keeps
+      inheriting its name; a subagent is a distinct, usually-unnamed
+      child and should not silently borrow the coordinator's name.
 
 Both formats are undocumented internals observed by inspection, not a
 specified contract -- see the CAVEATS section of the man page.
@@ -60,13 +75,28 @@ def _file_mtime(path: Path) -> Optional[dt.datetime]:
         return None
 
 
+def _read_json(path: Path) -> Optional[dict]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    try:
+        record = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
 # --------------------------------------------------------------------------
 # Claude Code
 # --------------------------------------------------------------------------
 
 
 def iter_claude_sessions(claude_dir: Path) -> Iterator[Session]:
-    """Yield one Session per Claude Code transcript under *claude_dir*."""
+    """Yield one Session per Claude Code transcript under *claude_dir*.
+
+    Covers both top-level (coordinator) sessions and their subagents.
+    """
     projects_dir = claude_dir / "projects"
     if not projects_dir.is_dir():
         return
@@ -75,6 +105,14 @@ def iter_claude_sessions(claude_dir: Path) -> Iterator[Session]:
             session = _parse_claude_transcript(jsonl_path)
             if session is not None:
                 yield session
+            coordinator_id = jsonl_path.stem
+            subagents_dir = project_dir / coordinator_id / "subagents"
+            if not subagents_dir.is_dir():
+                continue
+            for agent_path in sorted(subagents_dir.glob("agent-*.jsonl")):
+                subagent = _parse_claude_subagent(agent_path, coordinator_id)
+                if subagent is not None:
+                    yield subagent
 
 
 def _parse_claude_transcript(path: Path) -> Optional[Session]:
@@ -82,7 +120,49 @@ def _parse_claude_transcript(path: Path) -> Optional[Session]:
     if updated_at is None:
         return None
 
-    session_id = path.stem
+    cwd, started_at, name = _scan_claude_lines(path)
+
+    return Session(
+        provider="claude",
+        id=path.stem,
+        name=name,
+        cwd=cwd,
+        started_at=started_at,
+        updated_at=updated_at,
+        path=path,
+    )
+
+
+def _parse_claude_subagent(path: Path, coordinator_id: str) -> Optional[Session]:
+    updated_at = _file_mtime(path)
+    if updated_at is None:
+        return None
+
+    cwd, started_at, _name = _scan_claude_lines(path)
+
+    meta = _read_json(path.with_suffix("").with_suffix(".meta.json")) or {}
+    agent_type = meta.get("agentType")
+    description = meta.get("description")
+    if agent_type and description:
+        role = f"{agent_type}: {description}"
+    else:
+        role = agent_type or description
+
+    return Session(
+        provider="claude",
+        id=path.stem,
+        name=None,
+        cwd=cwd,
+        started_at=started_at,
+        updated_at=updated_at,
+        path=path,
+        parent_id=coordinator_id,
+        role=role,
+    )
+
+
+def _scan_claude_lines(path: Path) -> Tuple[Optional[str], Optional[dt.datetime], Optional[str]]:
+    """Return (cwd, started_at, name) found by scanning a transcript's lines."""
     cwd: Optional[str] = None
     started_at: Optional[dt.datetime] = None
     name: Optional[str] = None
@@ -122,17 +202,9 @@ def _parse_claude_transcript(path: Path) -> Optional[Session]:
                         if match:
                             name = match.group(1)
     except OSError:
-        return None
+        pass
 
-    return Session(
-        provider="claude",
-        id=session_id,
-        name=name,
-        cwd=cwd,
-        started_at=started_at,
-        updated_at=updated_at,
-        path=path,
-    )
+    return cwd, started_at, name
 
 
 # --------------------------------------------------------------------------
@@ -200,9 +272,12 @@ def _parse_codex_rollout(path: Path, name_index: Dict[str, str]) -> Optional[Ses
 
     session_id: Optional[str] = None
     alt_id: Optional[str] = None
-    parent_id: Optional[str] = None
+    thread_parent_id: Optional[str] = None
     cwd: Optional[str] = None
     started_at: Optional[dt.datetime] = None
+    is_subagent = False
+    agent_role: Optional[str] = None
+    agent_nickname: Optional[str] = None
 
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
@@ -223,20 +298,52 @@ def _parse_codex_rollout(path: Path, name_index: Dict[str, str]) -> Optional[Ses
             payload = {}
         session_id = payload.get("id")
         alt_id = payload.get("session_id")
-        parent_id = payload.get("parent_thread_id")
+        thread_parent_id = payload.get("parent_thread_id")
         cwd_value = payload.get("cwd")
         if isinstance(cwd_value, str):
             cwd = cwd_value
         started_at = _parse_timestamp(record.get("timestamp") or payload.get("timestamp"))
 
+        is_subagent = payload.get("thread_source") == "subagent"
+        agent_role = payload.get("agent_role")
+        agent_nickname = payload.get("agent_nickname")
+        if not (agent_role or agent_nickname):
+            # payload["source"] is a plain string ("cli") on an ordinary
+            # session and only a dict for a subagent spawn -- so every
+            # step here has to tolerate the wrong shape, not just a
+            # missing key.
+            source = payload.get("source")
+            subagent_block = source.get("subagent") if isinstance(source, dict) else None
+            spawn = subagent_block.get("thread_spawn") if isinstance(subagent_block, dict) else None
+            if not isinstance(spawn, dict):
+                spawn = {}
+            agent_role = agent_role or spawn.get("agent_role")
+            agent_nickname = agent_nickname or spawn.get("agent_nickname")
+            if not thread_parent_id:
+                thread_parent_id = spawn.get("parent_thread_id")
+
     if not session_id:
         session_id = _fallback_id_from_filename(path)
 
-    name = None
-    for candidate in (session_id, alt_id, parent_id):
-        if candidate and candidate in name_index:
-            name = name_index[candidate]
-            break
+    parent_id: Optional[str] = None
+    role: Optional[str] = None
+    name: Optional[str] = None
+
+    if is_subagent:
+        # A subagent is a distinct child of its coordinator, not a
+        # continuation of it -- fold it under the coordinator instead of
+        # inheriting the coordinator's name onto an unrelated row.
+        parent_id = thread_parent_id or alt_id
+        if agent_role and agent_nickname:
+            role = f"{agent_role}:{agent_nickname}"
+        else:
+            role = agent_role or agent_nickname
+    else:
+        # A plain resume of a named thread should keep showing that name.
+        for candidate in (session_id, alt_id, thread_parent_id):
+            if candidate and candidate in name_index:
+                name = name_index[candidate]
+                break
 
     return Session(
         provider="codex",
@@ -246,6 +353,8 @@ def _parse_codex_rollout(path: Path, name_index: Dict[str, str]) -> Optional[Ses
         started_at=started_at,
         updated_at=updated_at,
         path=path,
+        parent_id=parent_id,
+        role=role,
     )
 
 

@@ -5,12 +5,16 @@ List and filter [Claude Code](https://claude.com/product/claude-code) and
 the shell, without launching either tool.
 
 ```
-$ agent-sessions --named-only
-PROVIDER  UPDATED           NAME                          WORKSPACE                         ID
-claude    2026-07-10 19:06  education_harness_enhancement /home/ubuntu/work/structured_dm  4c0f5d59
-codex     2026-07-09 18:18  folder_structure_maintenance  /home/ubuntu/work/structured_dm  e2bec7f9
-codex     2026-06-25 20:05  cudf_tensor_mapper_planning   /home/ubuntu/work/diskgraph      edee6f4b
+$ agent-sessions -p codex --limit 4
+PROVIDER  UPDATED           NAME     WORKSPACE                         ID
+codex     2026-07-10 19:21  sdk_112  /home/ubuntu/work/structured_dm  019f1641
+codex     2026-07-10 18:50  └─ explorer:Jason                        019f4d59
+codex     2026-07-10 18:50  └─ explorer:Nash                         019f4d5a
+codex     2026-07-09 18:59  └─ worker:Laplace                        019f399e
 ```
+
+A coordinator's subagents nest under it instead of showing up as unrelated
+rows that happen to share its name -- see [Subagents](#subagents).
 
 ## Why
 
@@ -41,9 +45,10 @@ shorter alias `asess`.
 ```bash
 agent-sessions                                   # table, default workspace root, newest first
 agent-sessions --named-only                      # only sessions you renamed
-agent-sessions -p codex -q sampler                # Codex sessions with "sampler" in the name
+agent-sessions -p codex -q sampler                # sessions/subagents matching "sampler"
 agent-sessions --all-workspaces --format jsonl    # everything, machine-readable
 agent-sessions --since 2026-07-01 --sort started --reverse
+agent-sessions --flat -p codex                    # subagents as plain rows, no nesting
 ```
 
 Full option reference:
@@ -93,13 +98,56 @@ session; each rollout file is one row. The first line is always a
 tracked separately, as an append-only `id` -> `thread_name` history in
 `$CODEX_HOME/session_index.jsonl`; the entry with the latest `updated_at`
 per id wins, and the lookup falls back from a rollout's own `id` to its
-`session_id` then `parent_thread_id` so a resumed/spawned session still
-resolves the name of the thread it belongs to.
+`session_id` then `parent_thread_id` so a *resumed* session still resolves
+the name of the thread it belongs to. A *subagent* spawn is deliberately
+excluded from that fallback -- see below.
 
 If a scan of one provider starts coming back empty, or looks wrong, after a
 tool upgrade, that provider's on-disk layout is the first thing to check --
 run `agent-sessions -p <provider> --all-workspaces -l` and compare a row's
 `PATH` against what's actually on disk.
+
+## Subagents
+
+A coordinator session that spawns subagents links each child back to it,
+but the two tools record that link completely differently, and both were
+reverse-engineered the same way as everything else here:
+
+**Claude Code** writes each subagent to its own file at
+`<same project dir>/<coordinator-id>/subagents/agent-<hash>.jsonl`, with a
+companion `agent-<hash>.meta.json` carrying `agentType` and `description` --
+used as the subagent's role (`"<agentType>: <description>"`), since
+subagents are never independently renamed.
+
+**Codex CLI** writes each subagent to an ordinary-looking rollout file whose
+first record has `payload.thread_source == "subagent"` and
+`payload.parent_thread_id` pointing at the coordinator (occasionally nested
+instead under `payload.source.subagent.thread_spawn` -- both shapes have
+been observed, and `payload.source` itself is sometimes a plain string
+rather than an object, which crashed an earlier version of this tool on
+real data). The role comes from `agent_role`/`agent_nickname`:
+`"<role>:<nickname>"`.
+
+`thread_source == "subagent"` is exactly what separates a real subagent
+spawn from a plain resume of the same thread -- both carry
+`parent_thread_id`, but a resume's `thread_source` is `"user"`. Only a
+subagent spawn gets folded under its coordinator; a resume keeps showing
+the thread's own name, as before. Getting this distinction wrong is the
+literal bug that motivated adding `parent_id`/`role` in the first place: an
+earlier version of this tool applied the same name-inheritance fallback to
+both cases, so three unrelated subagent rows would each show their
+coordinator's name with no indication they were the same fan-out.
+
+In table format, a session with a `parent_id` that resolves within the
+current (already filtered/sorted) result set is indented under its parent
+instead of listed flat; identical workspace paths are blanked on the nested
+row to cut repetition. A subagent whose coordinator got excluded by a
+filter (`--since`, `--named-only`, a `--workspace-root` mismatch, ...)
+still shows up, just as a standalone row rather than a nested one -- it's
+never silently dropped. `--flat` disables nesting entirely. `json`/`jsonl`
+output is always flat and carries `parent_id`/`role` directly, so a script
+or another agent can reconstruct the tree itself instead of parsing tree
+glyphs out of a table.
 
 ## Development
 
