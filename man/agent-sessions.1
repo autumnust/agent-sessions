@@ -1,0 +1,230 @@
+.TH AGENT-SESSIONS 1 "2026-07-10" "agent-sessions 0.1.0" "User Commands"
+.SH NAME
+agent-sessions \- list and filter Claude Code and Codex CLI session transcripts
+.SH SYNOPSIS
+.B agent-sessions
+[\fB\-p\fR \fIPROVIDER\fR]
+[\fB\-w\fR \fIPATH\fR]...
+[\fB\-A\fR]
+[\fB\-n\fR]
+[\fB\-q\fR \fITEXT\fR]
+[\fB\-\-since\fR \fIDATETIME\fR]
+[\fB\-\-until\fR \fIDATETIME\fR]
+[\fB\-s\fR \fIKEY\fR]
+[\fB\-r\fR]
+[\fB\-L\fR \fIN\fR]
+[\fB\-f\fR \fIFORMAT\fR]
+[\fB\-l\fR]
+[\fB\-\-no\-header\fR]
+[\fB\-\-claude\-dir\fR \fIDIR\fR]
+[\fB\-\-codex\-dir\fR \fIDIR\fR]
+.br
+.B agent-sessions
+{\fB\-h\fR|\fB\-\-help\fR|\fB\-V\fR|\fB\-\-version\fR}
+.SH DESCRIPTION
+.B agent-sessions
+scans the on-disk transcript stores that
+.BR claude (1)
+(Claude Code) and
+.BR codex (1)
+(Codex CLI) maintain on this machine, and prints one line per session:
+which tool produced it, when it was last touched, its human-assigned
+name if any, the working directory it ran in, and its session id.
+.PP
+Neither tool exposes a public API or subcommand for this, so
+.B agent-sessions
+reads their transcript files directly. See
+.B FILES
+below, and the "File formats" section of the project README, for
+exactly what is read and how it can break if either tool changes its
+on-disk layout. See
+.B CAVEATS
+before relying on this in a script.
+.PP
+Output defaults to a human-readable table restricted to sessions whose
+working directory falls under
+.IR /home/ubuntu/work ,
+matching where most work happens on this machine. Both the workspace
+filter and its default can be changed; see
+.B \-\-workspace\-root
+and
+.BR \-\-all\-workspaces .
+.SH OPTIONS
+.TP
+\fB\-p\fR, \fB\-\-provider\fR {claude,codex,all}
+Restrict to sessions from one provider. Default: \fBall\fR.
+.TP
+\fB\-w\fR, \fB\-\-workspace\-root\fR \fIPATH\fR
+Only include sessions whose working directory is \fIPATH\fR or below
+it. Repeatable; a session is included if it falls under \fIany\fR
+given root. Sessions whose working directory could not be recovered
+from their transcript are excluded whenever at least one root is in
+effect.
+.br
+Default: the colon-separated list in
+\fB$AGENT_SESSIONS_WORKSPACE_ROOT\fR, or
+.I /home/ubuntu/work
+if that variable is unset.
+.TP
+\fB\-A\fR, \fB\-\-all\-workspaces\fR
+Disable the workspace-root filter entirely; include every session
+found, including ones with no recoverable working directory.
+.TP
+\fB\-n\fR, \fB\-\-named\-only\fR
+Skip sessions that were never given a human name (via \fB/rename\fR in
+Claude Code, or the equivalent thread-rename action in Codex CLI).
+.TP
+\fB\-q\fR, \fB\-\-query\fR \fITEXT\fR
+Case-insensitive substring match against the session name. Sessions
+without a name never match.
+.TP
+\fB\-\-since\fR \fIDATETIME\fR, \fB\-\-until\fR \fIDATETIME\fR
+Only include sessions last updated at/after, or at/before,
+\fIDATETIME\fR. Accepts ISO-8601 dates or date-times
+(\fB2026\-07\-01\fR or \fB2026\-07\-01T12:00:00\fR); a bare date is
+midnight local time.
+.TP
+\fB\-s\fR, \fB\-\-sort\fR {updated,started,name}
+Sort key. Default: \fBupdated\fR.
+.TP
+\fB\-r\fR, \fB\-\-reverse\fR
+Reverse the default sort order: \fBupdated\fR/\fBstarted\fR default to
+newest-first and become oldest-first; \fBname\fR defaults to A-Z and
+becomes Z-A.
+.TP
+\fB\-L\fR, \fB\-\-limit\fR \fIN\fR
+Only show the first \fIN\fR results after sorting.
+.TP
+\fB\-f\fR, \fB\-\-format\fR {table,json,jsonl}
+Output format. \fBtable\fR is for humans. \fBjson\fR prints one
+indented JSON array. \fBjsonl\fR prints one compact JSON object per
+line and is the recommended format for scripts and for other agents
+consuming this tool's output. Default: \fBtable\fR.
+.TP
+\fB\-l\fR, \fB\-\-long\fR
+In table format, add the session's start time, full id, and
+transcript path as extra columns.
+.TP
+\fB\-\-no\-header\fR
+In table format, omit the header row.
+.TP
+\fB\-\-claude\-dir\fR \fIDIR\fR
+Claude Code config directory to scan. Default: \fB$CLAUDE_CONFIG_DIR\fR
+if set, else
+.IR ~/.claude .
+.TP
+\fB\-\-codex\-dir\fR \fIDIR\fR
+Codex CLI home directory to scan. Default: \fB$CODEX_HOME\fR if set,
+else
+.IR ~/.codex .
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print usage and exit.
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print the version and exit.
+.SH EXIT STATUS
+.TP
+.B 0
+Success. This includes the case where no sessions matched \(em an
+empty result is not an error.
+.TP
+.B 1
+A session store could not be scanned because of an I/O error. A
+provider's directory simply not existing is not an error and yields
+zero sessions for that provider.
+.TP
+.B 2
+Bad command-line arguments.
+.SH ENVIRONMENT
+.TP
+.B CLAUDE_CONFIG_DIR
+Overrides the default Claude Code config directory
+.RI ( ~/.claude ).
+The same variable Claude Code itself honors.
+.TP
+.B CODEX_HOME
+Overrides the default Codex CLI home directory
+.RI ( ~/.codex ).
+The same variable Codex CLI itself honors.
+.TP
+.B AGENT_SESSIONS_WORKSPACE_ROOT
+Colon-separated default for \fB\-\-workspace\-root\fR, used when the
+option is not given on the command line.
+.SH FILES
+.TP
+.I $CLAUDE_CONFIG_DIR/projects/*/*.jsonl
+One file per Claude Code session. The file's directory name encodes
+the working directory it was started from, but that encoding is lossy,
+so this tool reads the \fBcwd\fR field recorded directly on the
+transcript's own lines instead of decoding the directory name.
+.TP
+.I $CODEX_HOME/sessions/YYYY/MM/DD/rollout\-*.jsonl
+One file per Codex CLI session, or per resume, since resuming a
+session across process restarts can start a new rollout file that
+references the original thread. The first line is a
+\fBsession_meta\fR record carrying \fBid\fR, \fBcwd\fR, and
+\fBtimestamp\fR.
+.TP
+.I $CODEX_HOME/session_index.jsonl
+Append-only log of Codex thread rename events (\fBid\fR,
+\fBthread_name\fR, \fBupdated_at\fR); the entry with the latest
+\fBupdated_at\fR per id wins.
+.SH EXAMPLES
+List sessions under the default workspace root, most recently updated
+first:
+.PP
+.RS
+.EX
+agent\-sessions
+.EE
+.RE
+.PP
+Only the ones you bothered to name:
+.PP
+.RS
+.EX
+agent\-sessions \-\-named\-only
+.EE
+.RE
+.PP
+Codex sessions with "sampler" in the name:
+.PP
+.RS
+.EX
+agent\-sessions \-p codex \-q sampler
+.EE
+.RE
+.PP
+Every session on the machine, names only, for a script or another
+agent:
+.PP
+.RS
+.EX
+agent\-sessions \-\-all\-workspaces \-\-format jsonl | jq \-r '.name'
+.EE
+.RE
+.PP
+Sessions started on or after July 1st, oldest first:
+.PP
+.RS
+.EX
+agent\-sessions \-\-since 2026\-07\-01 \-\-sort started \-\-reverse
+.EE
+.RE
+.SH CAVEATS
+Both providers' transcript formats are undocumented internals,
+observed by inspection rather than specified, and can change without
+notice between tool versions. Behavior here was last verified against
+Claude Code 2.1.206 and Codex CLI 0.142.0. If a scan of one provider
+starts returning nothing, or looks wrong, after a tool upgrade, that
+provider's on-disk layout is the first thing to check.
+.PP
+A Codex thread that has been resumed across process restarts may
+appear as more than one row, one per rollout file, since this tool
+does not attempt to merge them into a single logical session.
+.SH SEE ALSO
+.BR claude (1),
+.BR codex (1)
+.SH AUTHOR
+Lei Sun
