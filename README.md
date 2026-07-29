@@ -8,7 +8,7 @@ the shell, without launching either tool.
 $ agent-sessions -p codex --limit 6
 PROVIDER  UPDATED           ID        NAME
 
-~/work/structured_dm
+~/work/structured_dm  (2 sessions, 3 subagents)
 codex     2026-07-10 19:21  019f1641  sdk_112
 codex     2026-07-10 18:50  019f4d59  ├─ explorer:Jason
 codex     2026-07-10 18:50  019f4d5a  ├─ explorer:Nash
@@ -16,8 +16,10 @@ codex     2026-07-09 18:59  019f399e  └─ worker:Laplace
 
 codex     2026-07-08 09:14  019f2a03  -
 
-~/work/diskgraph
+~/work/diskgraph  (1 session)
 codex     2026-07-07 17:02  019f22b8  bench_rerun
+
+3 sessions and 3 subagents across 2 workspaces, 2026-07-07 to 2026-07-10
 ```
 
 Sessions are grouped under the workspace directory they ran in, and a
@@ -171,6 +173,14 @@ find without re-reading paths:
   directory is annotated inline as `(in <path>)`. A session whose directory
   could not be recovered from its transcript lands under `(unknown
   workspace)`.
+- **Counts.** Each heading carries its tally, and a closing line totals the
+  whole result. The two numbers partition the rows rather than overlapping:
+  *sessions* counts top-level rows, *subagents* counts nested ones, and the
+  sum is the number of rows printed — so `(1 session, 2 subagents)` is a
+  three-row block. `subagents` is omitted when there are none, and the
+  closing line reports the `updated_at` span of everything shown. Both are
+  chrome, so `--no-header` drops the closing line along with the column
+  header.
 - **Blank lines.** One before each workspace heading. Inside a workspace, a
   coordinator-plus-subagents block is set apart from its neighbours, while
   runs of plain single-row sessions stay packed -- so the gaps mark

@@ -186,6 +186,46 @@ def _flat_row(session: Session, long: bool) -> List[str]:
     return cells
 
 
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _tally(blocks: Sequence[List[Tuple[Session, str]]]) -> Tuple[int, int]:
+    """Return (top-level sessions, subagents) across *blocks*.
+
+    A block is one top-level session plus its descendants, so the two
+    numbers partition the rows -- nothing is counted twice, and their sum
+    is the number of printed rows.
+    """
+    tops = len(blocks)
+    subagents = sum(len(block) - 1 for block in blocks)
+    return tops, subagents
+
+
+def _counts_phrase(tops: int, subagents: int, joiner: str) -> str:
+    parts = [_plural(tops, "session")]
+    if subagents:
+        parts.append(_plural(subagents, "subagent"))
+    return joiner.join(parts)
+
+
+def _summary_line(
+    groups: Sequence[Tuple[Optional[str], List[List[Tuple[Session, str]]]]]
+) -> str:
+    """One closing line: how much was shown, over how many workspaces, when."""
+    all_blocks = [block for _, blocks in groups for block in blocks]
+    tops, subagents = _tally(all_blocks)
+    text = _counts_phrase(tops, subagents, " and ")
+    text += f" across {_plural(len(groups), 'workspace')}"
+
+    stamps = [session.updated_at for block in all_blocks for session, _ in block]
+    if stamps:
+        first = min(stamps).astimezone().strftime("%Y-%m-%d")
+        last = max(stamps).astimezone().strftime("%Y-%m-%d")
+        text += f", {first}" if first == last else f", {first} to {last}"
+    return text
+
+
 def _widths(columns: Sequence[str], rows: List[List[str]]) -> List[int]:
     widths = [len(c) for c in columns]
     for row in rows:
@@ -246,7 +286,7 @@ def _render_grouped_table(sessions: List[Session], *, long: bool, header: bool) 
 
     for cwd, blocks in groups:
         lines.append("")
-        lines.append(_display_path(cwd))
+        lines.append(f"{_display_path(cwd)}  ({_counts_phrase(*_tally(blocks), ', ')})")
         previous_was_tall = False
         for i, block in enumerate(blocks):
             tall = len(block) > 1
@@ -258,6 +298,12 @@ def _render_grouped_table(sessions: List[Session], *, long: bool, header: bool) 
             for session, prefix in block:
                 lines.append(_line(_grouped_row(session, prefix, cwd, long), widths))
             previous_was_tall = tall
+
+    # The footer is chrome, like the column header: --no-header is asking
+    # for rows and headings only, so it drops both.
+    if header and groups:
+        lines.append("")
+        lines.append(_summary_line(groups))
 
     if not header and lines and lines[0] == "":
         lines.pop(0)

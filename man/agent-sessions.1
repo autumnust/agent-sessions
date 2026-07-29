@@ -122,7 +122,10 @@ In table format, add the session's start time, full id, and
 transcript path as extra columns.
 .TP
 \fB\-\-no\-header\fR
-In table format, omit the header row.
+In table format, omit the column header row, and with it the closing
+summary line \-\- both are chrome around the rows. Workspace headings and
+their counts are kept, since they carry the grouping itself. See
+.BR "TABLE LAYOUT" .
 .TP
 \fB\-\-flat\fR
 In table format, print one plain row per session: no workspace
@@ -215,6 +218,15 @@ appears under the active \fB\-\-sort\fR, with \fB$HOME\fR collapsed to
 coordinator's directory is annotated inline as \fB(in \fIPATH\fB)\fR. A
 session whose directory could not be recovered from its transcript is
 grouped under \fB(unknown workspace)\fR.
+.TP
+.B Counts and totals
+Each heading carries its own tally and a closing line totals the whole
+result. The two numbers partition the rows rather than overlapping:
+\fIsessions\fR counts top\-level rows and \fIsubagents\fR counts nested
+ones, so \fB(1 session, 2 subagents)\fR heads a three\-row block. The
+subagent count is omitted where there are none. The closing line also
+reports the \fBupdated_at\fR span of everything shown, collapsed to a
+single date when that span is one day.
 .TP
 .B Blank lines
 One before each workspace heading. Within a workspace, a

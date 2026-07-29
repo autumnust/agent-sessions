@@ -12,6 +12,16 @@ from agent_sessions.models import Session
 from agent_sessions.render import render
 
 
+def _local(year: int, month: int, day: int, hour: int = 0) -> dt.datetime:
+    """A timestamp in the machine's own zone.
+
+    The renderer formats via astimezone(), so a UTC literal here would
+    land on the previous or next calendar day depending on where the test
+    runs, and the date assertions would pass or fail by geography.
+    """
+    return dt.datetime(year, month, day, hour).astimezone()
+
+
 def _session(**overrides) -> Session:
     defaults = dict(
         provider="claude",
@@ -54,11 +64,17 @@ def test_jsonl_one_compact_line_per_session():
 
 
 def _session_lines(out: str) -> list:
-    """The session rows of a grouped table: no header, headings, or blanks."""
+    """The session rows of a grouped table: no header, headings, footer, blanks."""
     lines = out.splitlines()
     if lines and lines[0].startswith("PROVIDER"):
         lines = lines[1:]
+    if lines and (" across " in lines[-1]):
+        lines = lines[:-1]
     return [ln for ln in lines if ln.strip() and not ln.startswith(("/", "~", "("))]
+
+
+def _heading_lines(out: str) -> list:
+    return [ln for ln in out.splitlines() if ln.startswith(("/", "~", "("))]
 
 
 def test_table_header_and_row():
@@ -71,7 +87,7 @@ def test_table_header_and_row():
 
 def test_table_groups_rows_under_a_workspace_heading():
     out = render([_session()], "table")
-    assert "/home/ubuntu/work/proj-a" in out.splitlines()
+    assert _heading_lines(out) == ["/home/ubuntu/work/proj-a  (1 session)"]
     # the workspace is the heading, so it is not repeated as a column
     assert out.splitlines()[0].split() == ["PROVIDER", "UPDATED", "ID", "NAME"]
     assert _session_lines(out)[0].count("/home/ubuntu/work/proj-a") == 0
@@ -80,13 +96,13 @@ def test_table_groups_rows_under_a_workspace_heading():
 def test_table_heading_abbreviates_the_home_directory(monkeypatch):
     monkeypatch.setenv("HOME", "/home/ubuntu")
     out = render([_session(cwd="/home/ubuntu/work/proj-a")], "table")
-    assert "~/work/proj-a" in out.splitlines()
+    assert _heading_lines(out)[0].startswith("~/work/proj-a  (")
 
 
 def test_table_no_header_starts_at_the_first_heading():
     out = render([_session()], "table", header=False)
     assert "PROVIDER" not in out
-    assert out.splitlines()[0] == "/home/ubuntu/work/proj-a"
+    assert out.splitlines()[0] == "/home/ubuntu/work/proj-a  (1 session)"
 
 
 def test_table_long_includes_path_and_full_id():
@@ -102,7 +118,7 @@ def test_table_missing_name_renders_as_dash():
 
 def test_table_missing_cwd_gets_its_own_heading():
     out = render([_session(cwd=None)], "table")
-    assert "(unknown workspace)" in out.splitlines()
+    assert _heading_lines(out)[0].startswith("(unknown workspace)  (")
 
 
 def test_empty_sessions_table_is_header_only():
@@ -234,19 +250,19 @@ class TestGrouping:
             ],
             "table",
         )
-        headings = [ln for ln in out.splitlines() if ln.startswith("/w/")]
-        assert headings == ["/w/one", "/w/two"]
+        assert _heading_lines(out) == ["/w/one  (2 sessions)", "/w/two  (1 session)"]
 
     def test_a_blank_line_separates_consecutive_workspaces(self):
         out = render([self._at(id="a", cwd="/w/one"), self._at(id="b", cwd="/w/two")], "table")
         lines = out.splitlines()
-        assert lines[lines.index("/w/two") - 1] == ""
+        assert lines[lines.index("/w/two  (1 session)") - 1] == ""
 
     def test_single_row_sessions_in_one_workspace_stay_packed(self):
         out = render(
-            [self._at(id="a", cwd="/w/one"), self._at(id="b", cwd="/w/one")], "table"
+            [self._at(id="a", cwd="/w/one"), self._at(id="b", cwd="/w/one")], "table",
+            header=False,
         )
-        body = out.splitlines()[out.splitlines().index("/w/one") + 1 :]
+        body = out.splitlines()[1:]  # everything after the sole heading
         assert "" not in body  # no gap inserted between two plain rows
 
     def test_a_coordinator_block_is_set_apart_from_its_neighbours(self):
@@ -265,6 +281,78 @@ class TestGrouping:
         assert lines[coord_at - 1] == ""  # gap opened above the block
         assert child_at == coord_at + 1  # but the block itself is contiguous
         assert lines[child_at + 1] == ""  # and closed below it
+
+
+class TestCounts:
+    """Heading tallies and the closing summary line."""
+
+    def _at(self, **overrides):
+        defaults = dict(name=None, role=None, parent_id=None)
+        defaults.update(overrides)
+        return _session(**defaults)
+
+    def _coord_with_two_children(self, cwd="/w/one"):
+        return [
+            self._at(id="coord", name="sdk_112", cwd=cwd),
+            self._at(id="c1", role="explorer:Nash", cwd=cwd, parent_id="coord"),
+            self._at(id="c2", role="explorer:Bohr", cwd=cwd, parent_id="coord"),
+        ]
+
+    def test_heading_counts_subagents_separately_from_sessions(self):
+        # 3 rows, but only 1 of them is a top-level session -- the two
+        # numbers must partition the rows rather than overlap.
+        out = render(self._coord_with_two_children(), "table")
+        assert _heading_lines(out) == ["/w/one  (1 session, 2 subagents)"]
+        assert len(_session_lines(out)) == 3
+
+    def test_heading_omits_subagents_when_there_are_none(self):
+        out = render([self._at(id="a", cwd="/w/one")], "table")
+        assert _heading_lines(out) == ["/w/one  (1 session)"]
+
+    def test_counts_are_singular_for_one(self):
+        rows = [
+            self._at(id="coord", cwd="/w/one"),
+            self._at(id="c1", role="explorer:Nash", cwd="/w/one", parent_id="coord"),
+        ]
+        assert _heading_lines(render(rows, "table")) == ["/w/one  (1 session, 1 subagent)"]
+
+    def test_summary_line_totals_reconcile_with_the_rows_printed(self):
+        rows = self._coord_with_two_children("/w/one") + [self._at(id="z", cwd="/w/two")]
+        out = render(rows, "table")
+        assert out.splitlines()[-1].startswith("2 sessions and 2 subagents across 2 workspaces")
+        assert len(_session_lines(out)) == 4  # 2 + 2
+
+    def test_summary_line_omits_subagents_when_there_are_none(self):
+        out = render([self._at(id="a", cwd="/w/one")], "table")
+        assert out.splitlines()[-1].startswith("1 session across 1 workspace")
+
+    def test_summary_line_reports_the_updated_at_range(self):
+        rows = [
+            self._at(id="a", cwd="/w/one", updated_at=_local(2026, 5, 26)),
+            self._at(id="b", cwd="/w/one", updated_at=_local(2026, 7, 29)),
+        ]
+        assert render(rows, "table").splitlines()[-1].endswith("2026-05-26 to 2026-07-29")
+
+    def test_summary_line_collapses_a_single_day_range(self):
+        rows = [
+            self._at(id="a", cwd="/w/one", updated_at=_local(2026, 7, 29, 9)),
+            self._at(id="b", cwd="/w/one", updated_at=_local(2026, 7, 29, 17)),
+        ]
+        last = render(rows, "table").splitlines()[-1]
+        assert last.endswith("across 1 workspace, 2026-07-29")
+
+    def test_no_header_drops_the_summary_line_too(self):
+        out = render([self._at(id="a", cwd="/w/one")], "table", header=False)
+        assert "across" not in out
+        assert out.splitlines()[-1].split()[0] == "claude"  # ends on a row
+
+    def test_empty_result_has_no_summary_line(self):
+        assert render([], "table").splitlines() == ["PROVIDER  UPDATED  ID  NAME"]
+
+    def test_flat_has_no_counts_or_summary(self):
+        out = render(self._coord_with_two_children(), "table", tree=False)
+        assert "session" not in out
+        assert "across" not in out
 
 
 class TestFlat:
