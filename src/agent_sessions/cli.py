@@ -21,7 +21,7 @@ EXAMPLES = """\
 examples:
   agent-sessions
         List sessions under the default workspace root, most recently
-        updated first.
+        updated first, grouped by the directory each one ran in.
 
   agent-sessions --named-only
         Only show sessions you bothered to name.
@@ -36,7 +36,8 @@ examples:
         Sessions started on/after 2026-07-01, oldest first.
 
   agent-sessions --flat -p codex
-        Every Codex row on its own line, subagents included, no nesting.
+        Every Codex row on its own line with its own WORKSPACE cell --
+        no grouping or nesting, for grep/awk.
 
 See agent-sessions(1) for the full manual (man ./man/agent-sessions.1
 works directly from a checkout without installing it).
@@ -141,8 +142,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--flat", action="store_true",
         help=(
-            "table format: list every session as its own row instead of "
-            "nesting subagents under their coordinator"
+            "table format: one plain row per session -- no workspace "
+            "headings, blank lines, or tree glyphs, and an explicit "
+            "WORKSPACE column instead"
         ),
     )
     parser.add_argument(

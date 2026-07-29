@@ -5,16 +5,27 @@ List and filter [Claude Code](https://claude.com/product/claude-code) and
 the shell, without launching either tool.
 
 ```
-$ agent-sessions -p codex --limit 4
-PROVIDER  UPDATED           NAME     WORKSPACE                         ID
-codex     2026-07-10 19:21  sdk_112  /home/ubuntu/work/structured_dm  019f1641
-codex     2026-07-10 18:50  └─ explorer:Jason                        019f4d59
-codex     2026-07-10 18:50  └─ explorer:Nash                         019f4d5a
-codex     2026-07-09 18:59  └─ worker:Laplace                        019f399e
+$ agent-sessions -p codex --limit 6
+PROVIDER  UPDATED           ID        NAME
+
+~/work/structured_dm
+codex     2026-07-10 19:21  019f1641  sdk_112
+codex     2026-07-10 18:50  019f4d59  ├─ explorer:Jason
+codex     2026-07-10 18:50  019f4d5a  ├─ explorer:Nash
+codex     2026-07-09 18:59  019f399e  └─ worker:Laplace
+
+codex     2026-07-08 09:14  019f2a03  -
+
+~/work/diskgraph
+codex     2026-07-07 17:02  019f22b8  bench_rerun
 ```
 
-A coordinator's subagents nest under it instead of showing up as unrelated
-rows that happen to share its name -- see [Subagents](#subagents).
+Sessions are grouped under the workspace directory they ran in, and a
+coordinator's subagents are drawn beneath it rather than appearing as
+unrelated rows that happen to share its name -- see
+[Subagents](#subagents). `--flat` turns both off and prints one plain row
+per session with an explicit `WORKSPACE` column, which is the shape to pipe
+into `grep`/`awk`.
 
 ## Why
 
@@ -139,15 +150,40 @@ both cases, so three unrelated subagent rows would each show their
 coordinator's name with no indication they were the same fan-out.
 
 In table format, a session with a `parent_id` that resolves within the
-current (already filtered/sorted) result set is indented under its parent
-instead of listed flat; identical workspace paths are blanked on the nested
-row to cut repetition. A subagent whose coordinator got excluded by a
+current (already filtered/sorted) result set is drawn beneath its parent
+instead of listed flat. A subagent whose coordinator got excluded by a
 filter (`--since`, `--named-only`, a `--workspace-root` mismatch, ...)
-still shows up, just as a standalone row rather than a nested one -- it's
-never silently dropped. `--flat` disables nesting entirely. `json`/`jsonl`
-output is always flat and carries `parent_id`/`role` directly, so a script
-or another agent can reconstruct the tree itself instead of parsing tree
-glyphs out of a table.
+still shows up, just as a standalone top-level row rather than a nested
+one -- it's never silently dropped. `--flat` disables nesting entirely.
+`json`/`jsonl` output is always flat and carries `parent_id`/`role`
+directly, so a script or another agent can reconstruct the tree itself
+instead of parsing tree glyphs out of a table.
+
+## Table layout
+
+The default table trades a little vertical space for boundaries you can
+find without re-reading paths:
+
+- **Workspace headings.** Each workspace directory gets one heading, in the
+  order it first appears under the active sort, with `$HOME` collapsed to
+  `~`. Because the workspace is the heading, the table has no `WORKSPACE`
+  column; a subagent that ran somewhere *other* than its coordinator's
+  directory is annotated inline as `(in <path>)`. A session whose directory
+  could not be recovered from its transcript lands under `(unknown
+  workspace)`.
+- **Blank lines.** One before each workspace heading. Inside a workspace, a
+  coordinator-plus-subagents block is set apart from its neighbours, while
+  runs of plain single-row sessions stay packed -- so the gaps mark
+  structure rather than doubling the table's height.
+- **`NAME` last.** It is the only free-form cell, and most sessions are
+  never named. Padding it to the width of the longest subagent description
+  would strand `ID` behind a gutter of `-`. Last also means it is never
+  padded, so a double-width (e.g. CJK) name cannot shift the columns after
+  it -- Python pads by code point, the terminal draws by cell.
+
+The cost of grouping is one heading line per workspace, which is a poor
+trade when a result set is one session per directory (`--named-only` over a
+wide history tends to look like this). Use `--flat` there.
 
 ## Development
 

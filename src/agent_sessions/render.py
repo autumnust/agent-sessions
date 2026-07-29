@@ -1,16 +1,46 @@
-"""Render a list of Session objects as table, json, or jsonl output."""
+"""Render a list of Session objects as table, json, or jsonl output.
+
+The default table is *grouped*: sessions are collected under a heading for
+the workspace directory they ran in, and a coordinator's subagents are
+drawn as a tree beneath it. Blank lines separate one workspace from the
+next, and set a coordinator-plus-subagents block apart from the
+single-row sessions around it, so the eye can find the boundaries without
+re-reading the paths.
+
+``--flat`` (``tree=False``) turns all of that off and prints one plain row
+per session with an explicit WORKSPACE column -- the shape to reach for
+when piping table output through ``grep``/``awk`` rather than reading it.
+"""
 
 from __future__ import annotations
 
 import json
-from typing import Dict, List, Optional, Set
+import os
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .models import Session
 
-_TABLE_COLUMNS = ("PROVIDER", "UPDATED", "NAME", "WORKSPACE", "ID")
-_LONG_COLUMNS = ("PROVIDER", "UPDATED", "STARTED", "NAME", "WORKSPACE", "ID", "PATH")
+_FLAT_COLUMNS = ("PROVIDER", "UPDATED", "NAME", "WORKSPACE", "ID")
+_FLAT_LONG_COLUMNS = ("PROVIDER", "UPDATED", "STARTED", "NAME", "WORKSPACE", "ID", "PATH")
+# The grouped table drops WORKSPACE: the workspace is the group heading, so
+# repeating it on every row is the noise this layout exists to remove.
+#
+# NAME comes last on purpose. It is the only free-form cell -- most sessions
+# are never named, so padding it to the width of the longest subagent
+# description would strand the fixed columns behind a gutter of "-". Last
+# also means its width is never padded at all, which keeps CJK and other
+# double-width names from shifting the columns after them (str padding
+# counts code points, the terminal draws cells).
+_GROUPED_COLUMNS = ("PROVIDER", "UPDATED", "ID", "NAME")
+_GROUPED_LONG_COLUMNS = ("PROVIDER", "UPDATED", "STARTED", "ID", "NAME", "PATH")
+
 _SHORT_ID_LEN = 8
-_BRANCH = "└─ "  # "└─ "
+_UNKNOWN_WORKSPACE = "(unknown workspace)"
+
+_LAST = "└─ "  # "└─ "
+_MID = "├─ "  # "├─ "
+_PIPE = "│  "  # "│  "
+_GAP = "   "
 
 
 def render(
@@ -26,7 +56,9 @@ def render(
     if fmt == "jsonl":
         return "\n".join(json.dumps(s.to_dict()) for s in sessions)
     if fmt == "table":
-        return _render_table(sessions, long=long, header=header, tree=tree)
+        if tree:
+            return _render_grouped_table(sessions, long=long, header=header)
+        return _render_flat_table(sessions, long=long, header=header)
     raise ValueError(f"unknown format: {fmt!r}")
 
 
@@ -40,85 +72,193 @@ def _short_id(session_id: str) -> str:
     return session_id[:_SHORT_ID_LEN] if len(session_id) > _SHORT_ID_LEN else session_id
 
 
-def _row_for(
-    session: Session, long: bool, *, depth: int = 0, parent: Optional[Session] = None
-) -> List[str]:
-    display_name = session.name or session.role or "-"
-    if depth > 0:
-        display_name = ("  " * (depth - 1)) + _BRANCH + display_name
-
-    display_cwd = session.cwd or "-"
-    if depth > 0 and parent is not None and session.cwd == parent.cwd:
-        display_cwd = ""  # same workspace as the parent row directly above; avoid repeating it
-
-    if long:
-        return [
-            session.provider,
-            _fmt_time(session.updated_at),
-            _fmt_time(session.started_at),
-            display_name,
-            display_cwd,
-            session.id,
-            str(session.path),
-        ]
-    return [
-        session.provider,
-        _fmt_time(session.updated_at),
-        display_name,
-        display_cwd,
-        _short_id(session.id),
-    ]
+def _display_path(path: Optional[str]) -> str:
+    """Shorten an absolute path by collapsing the home directory to ``~``."""
+    if not path:
+        return _UNKNOWN_WORKSPACE
+    home = os.path.expanduser("~")
+    if home and home != os.sep:
+        if path == home:
+            return "~"
+        if path.startswith(home + os.sep):
+            return "~" + path[len(home) :]
+    return path
 
 
-def _tree_rows(sessions: List[Session], long: bool) -> List[List[str]]:
-    """Flatten *sessions* into display rows, nesting subagents under their
-    coordinator (in the order the coordinator appears) instead of listing
-    every id as an unrelated flat row.
+# --------------------------------------------------------------------------
+# Tree construction
+# --------------------------------------------------------------------------
 
-    A session whose parent_id doesn't resolve within the current, already
-    filtered/sorted *sessions* list (parent excluded by a filter, or the
-    link is simply unknown) is rendered as a standalone top-level row
-    rather than silently dropped or mis-nested.
+
+def _child_map(sessions: List[Session]) -> Tuple[Dict[str, List[Session]], Set[str]]:
+    """Return ({parent id: children}, {ids that are nested under a parent}).
+
+    A session whose ``parent_id`` doesn't resolve within the current,
+    already filtered/sorted *sessions* list (parent excluded by a filter,
+    or the link is simply unknown) is left out of ``nested`` so it still
+    renders as its own top-level row rather than being silently dropped.
     """
     by_id: Dict[str, Session] = {s.id: s for s in sessions}
     children: Dict[str, List[Session]] = {}
-    nested_ids: Set[str] = set()
+    nested: Set[str] = set()
     for s in sessions:
         if s.parent_id and s.parent_id in by_id and s.parent_id != s.id:
             children.setdefault(s.parent_id, []).append(s)
-            nested_ids.add(s.id)
+            nested.add(s.id)
+    return children, nested
 
-    rows: List[List[str]] = []
+
+def _blocks(sessions: List[Session]) -> List[List[Tuple[Session, str]]]:
+    """Group *sessions* into blocks of (session, tree prefix) pairs.
+
+    Each block starts with one top-level session and is followed by its
+    descendants in depth-first order, each carrying the prefix string that
+    draws its position in the tree. Blocks come out in the order their
+    top-level session appears in *sessions*, so whatever sort the caller
+    applied still governs the output.
+    """
+    children, nested = _child_map(sessions)
+    blocks: List[List[Tuple[Session, str]]] = []
     visited: Set[str] = set()
 
-    def emit(session: Session, depth: int) -> None:
+    def walk(session: Session, prefix: str, block: List[Tuple[Session, str]]) -> None:
         if session.id in visited:
             return  # defends against a cyclic parent_id in corrupt/adversarial data
         visited.add(session.id)
-        parent = by_id.get(session.parent_id) if depth > 0 else None
-        rows.append(_row_for(session, long, depth=depth, parent=parent))
-        for child in children.get(session.id, []):
-            emit(child, depth + 1)
+        block.append((session, prefix))
+        kids = children.get(session.id, [])
+        for i, child in enumerate(kids):
+            last = i == len(kids) - 1
+            # The parent's own branch glyph is replaced by a continuation
+            # bar (or blank, if the parent was the last child) so deeper
+            # levels line up under the branch that produced them.
+            base = prefix.replace(_LAST, _GAP).replace(_MID, _PIPE)
+            walk(child, base + (_LAST if last else _MID), block)
 
     for s in sessions:
-        if s.id not in nested_ids:
-            emit(s, 0)
+        if s.id in nested:
+            continue
+        block: List[Tuple[Session, str]] = []
+        walk(s, "", block)
+        if block:
+            blocks.append(block)
 
-    return rows
+    return blocks
 
 
-def _render_table(sessions: List[Session], *, long: bool, header: bool, tree: bool) -> str:
-    columns = _LONG_COLUMNS if long else _TABLE_COLUMNS
-    rows = _tree_rows(sessions, long) if tree else [_row_for(s, long) for s in sessions]
+# --------------------------------------------------------------------------
+# Rows
+# --------------------------------------------------------------------------
 
+
+def _name_cell(session: Session, prefix: str, group_cwd: Optional[str]) -> str:
+    name = session.name or session.role or "-"
+    # A subagent almost always shares its coordinator's directory, which the
+    # group heading already states. Call out the exception rather than
+    # carrying a mostly-empty WORKSPACE column for it.
+    if prefix and session.cwd and session.cwd != group_cwd:
+        name = f"{name}  (in {_display_path(session.cwd)})"
+    return prefix + name
+
+
+def _grouped_row(
+    session: Session, prefix: str, group_cwd: Optional[str], long: bool
+) -> List[str]:
+    cells = [session.provider, _fmt_time(session.updated_at)]
+    if long:
+        cells.append(_fmt_time(session.started_at))
+    cells.append(session.id if long else _short_id(session.id))
+    cells.append(_name_cell(session, prefix, group_cwd))
+    if long:
+        cells.append(str(session.path))
+    return cells
+
+
+def _flat_row(session: Session, long: bool) -> List[str]:
+    cells = [session.provider, _fmt_time(session.updated_at)]
+    if long:
+        cells.append(_fmt_time(session.started_at))
+    cells.append(session.name or session.role or "-")
+    cells.append(session.cwd or "-")
+    cells.append(session.id if long else _short_id(session.id))
+    if long:
+        cells.append(str(session.path))
+    return cells
+
+
+def _widths(columns: Sequence[str], rows: List[List[str]]) -> List[int]:
     widths = [len(c) for c in columns]
     for row in rows:
         for i, cell in enumerate(row):
             widths[i] = max(widths[i], len(cell))
+    return widths
 
-    lines = []
+
+def _line(cells: Sequence[str], widths: Sequence[int]) -> str:
+    return "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(cells)).rstrip()
+
+
+# --------------------------------------------------------------------------
+# Table variants
+# --------------------------------------------------------------------------
+
+
+def _render_flat_table(sessions: List[Session], *, long: bool, header: bool) -> str:
+    columns = _FLAT_LONG_COLUMNS if long else _FLAT_COLUMNS
+    rows = [_flat_row(s, long) for s in sessions]
+    widths = _widths(columns, rows)
+
+    lines: List[str] = []
     if header:
-        lines.append("  ".join(c.ljust(widths[i]) for i, c in enumerate(columns)).rstrip())
-    for row in rows:
-        lines.append("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip())
+        lines.append(_line(columns, widths))
+    lines.extend(_line(row, widths) for row in rows)
+    return "\n".join(lines)
+
+
+def _render_grouped_table(sessions: List[Session], *, long: bool, header: bool) -> str:
+    columns = _GROUPED_LONG_COLUMNS if long else _GROUPED_COLUMNS
+
+    # Group blocks by the workspace of their top-level session, keeping the
+    # order in which each workspace first appears so the caller's sort still
+    # decides which workspace leads.
+    groups: List[Tuple[Optional[str], List[List[Tuple[Session, str]]]]] = []
+    index: Dict[Optional[str], int] = {}
+    for block in _blocks(sessions):
+        cwd = block[0][0].cwd
+        if cwd not in index:
+            index[cwd] = len(groups)
+            groups.append((cwd, []))
+        groups[index[cwd]][1].append(block)
+
+    # Widths are computed across every group so the columns line up down the
+    # whole table, not just within one workspace.
+    all_rows = [
+        _grouped_row(session, prefix, cwd, long)
+        for cwd, blocks in groups
+        for block in blocks
+        for session, prefix in block
+    ]
+    widths = _widths(columns, all_rows)
+
+    lines: List[str] = []
+    if header:
+        lines.append(_line(columns, widths))
+
+    for cwd, blocks in groups:
+        lines.append("")
+        lines.append(_display_path(cwd))
+        previous_was_tall = False
+        for i, block in enumerate(blocks):
+            tall = len(block) > 1
+            # Set a coordinator-plus-subagents block apart from its
+            # neighbours; runs of plain single-row sessions stay packed so
+            # the table doesn't double in height for no added meaning.
+            if i > 0 and (tall or previous_was_tall):
+                lines.append("")
+            for session, prefix in block:
+                lines.append(_line(_grouped_row(session, prefix, cwd, long), widths))
+            previous_was_tall = tall
+
+    if not header and lines and lines[0] == "":
+        lines.pop(0)
     return "\n".join(lines)

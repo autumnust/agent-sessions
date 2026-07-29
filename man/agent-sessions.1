@@ -44,7 +44,7 @@ before relying on this in a script.
 .PP
 A coordinator session that spawns subagents produces one row per
 subagent with the same relationship, apart from id, in both tools'
-storage. In table format these are nested under their coordinator
+storage. In table format these are drawn beneath their coordinator
 (indented, prefixed with a tree branch) instead of listed as flat,
 easily-confused rows; a subagent is identified by its
 .B role
@@ -125,9 +125,15 @@ transcript path as extra columns.
 In table format, omit the header row.
 .TP
 \fB\-\-flat\fR
-In table format, list every session as its own row instead of nesting
-subagents under their coordinator. Has no effect on \fBjson\fR/\fBjsonl\fR,
-which are always flat. See
+In table format, print one plain row per session: no workspace
+headings, no blank lines, no tree glyphs, and an explicit
+\fBWORKSPACE\fR column repeated on every row. This is the shape to pipe
+into \fBgrep\fR(1) or \fBawk\fR(1), and the one to prefer when a result
+set is roughly one session per directory, where the grouped layout costs
+a heading line per row. Has no effect on \fBjson\fR/\fBjsonl\fR, which
+are always flat. See
+.B TABLE LAYOUT
+and
 .BR SUBAGENTS .
 .TP
 \fB\-\-claude\-dir\fR \fIDIR\fR
@@ -197,6 +203,37 @@ Append-only log of Codex thread rename events (\fBid\fR,
 One file per Claude Code subagent, alongside a companion
 \fBagent\-*.meta.json\fR carrying \fBagentType\fR and \fBdescription\fR,
 used to build the subagent's \fBrole\fR.
+.SH TABLE LAYOUT
+The default table trades a little vertical space for boundaries a reader
+can find without re-reading paths. \fB\-\-flat\fR opts out of all of it.
+.TP
+.B Workspace headings
+Each working directory gets one heading line, in the order it first
+appears under the active \fB\-\-sort\fR, with \fB$HOME\fR collapsed to
+\fB~\fR. Because the workspace is the heading, the grouped table has no
+\fBWORKSPACE\fR column. A subagent that ran somewhere other than its
+coordinator's directory is annotated inline as \fB(in \fIPATH\fB)\fR. A
+session whose directory could not be recovered from its transcript is
+grouped under \fB(unknown workspace)\fR.
+.TP
+.B Blank lines
+One before each workspace heading. Within a workspace, a
+coordinator\-plus\-subagents block is set apart from its neighbours,
+while runs of plain single\-row sessions stay packed \-\- so a gap marks
+structure rather than doubling the table's height.
+.TP
+.B Column order
+\fBNAME\fR comes last. It is the only free\-form cell and most sessions
+are never named, so padding it to the width of the longest subagent
+description would strand \fBID\fR behind a gutter of \fB\-\fR. Last also
+means it is never padded, so a double\-width (for example CJK) name
+cannot shift the columns after it: padding counts code points, the
+terminal draws cells.
+.PP
+Grouping costs one heading line per workspace, which is a poor trade when
+a result set is about one session per directory \-\-
+\fB\-\-named\-only\fR over a wide history often is. Use \fB\-\-flat\fR
+there.
 .SH SUBAGENTS
 A session that spawns subagents (Claude Code's Agent tool; Codex CLI's
 equivalent) links each child back to its coordinator, but the two
